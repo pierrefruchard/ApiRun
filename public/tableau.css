@@ -1,0 +1,13 @@
+/* Vue grand écran (open space, Codir) : lisible à distance, s'adapte au mobile. */
+body.ecran { padding-bottom: 16px; }
+body.ecran main { max-width: 1400px; }
+.tb-entete { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.tb-grille { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+@media (min-width: 900px) { .tb-grille { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); } }
+.tb-anneau { display: flex; gap: 24px; align-items: center; flex-wrap: wrap; }
+.tb-anneau svg { width: min(260px, 60vw); height: auto; }
+.tb-ecart { font-size: clamp(2rem, 5vw, 3.5rem); font-weight: 800; font-variant-numeric: tabular-nums; }
+.tb-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.tb-paliers { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.tb-palier { border: 1px solid var(--bord); border-radius: 10px; padding: 10px; text-align: center; }
+.tb-palier.atteint { border: 2px solid var(--ok); color: var(--ok); font-weight: 700; }
