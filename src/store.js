@@ -16,6 +16,8 @@ export function etatInitial() {
     fil: [],
     encouragements: [],
     paliersFranchis: [],
+    journal: [],
+    syncContrats: null,
   };
 }
 

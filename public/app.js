@@ -1,5 +1,7 @@
 // App mobile : inscription, accueil, déclaration, classement, fil.
-import { api, h, km, kmCourt, kmSigne, m, entier, anneau, dateCourte } from './commun.js';
+import { api, h, km, kmCourt, kmSigne, m, entier, anneau, dateCourte, metresParContrat } from './commun.js';
+
+const dateLongue = (jour) => new Date(`${jour}T12:00:00Z`).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
 
 const vue = document.getElementById('vue');
 const onglets = document.getElementById('onglets');
@@ -45,7 +47,7 @@ async function ecranConnexionDev() {
 function ecranInscription() {
   const fiche = session.annuaire;
   if (!fiche) {
-    afficher(`<h1 tabindex="-1">Défi 1 contrat = ${config.ratioMetresParContrat} m</h1>
+    afficher(`<h1 tabindex="-1">Défi 1 contrat = ${h(metresParContrat(config.ratioMetresParContrat))}</h1>
       <div class="carte"><p>Ton compte n’apparaît pas dans l’annuaire de la direction. Contacte l’administrateur du défi.</p></div>`);
     return;
   }
@@ -55,7 +57,7 @@ function ecranInscription() {
       .join('')}</div>`;
   afficher(`
     <h1 tabindex="-1">Bienvenue ${h(fiche.prenom)}</h1>
-    <p class="sec">Chaque contrat signé ajoute ${config.ratioMetresParContrat} mètres au compteur commun. À nous de les couvrir, en courant, marchant ou pédalant.</p>
+    <p class="sec">Chaque contrat signé ajoute ${h(metresParContrat(config.ratioMetresParContrat))} au compteur commun. À nous de les couvrir, en courant, marchant ou pédalant.</p>
     <form id="f" class="carte" novalidate>
       <label for="couloir">Ton couloir</label>
       <select id="couloir">${config.couloirs.map((c) => `<option value="${c.id}" ${c.id === fiche.couloir ? 'selected' : ''}>${h(c.nom)}</option>`).join('')}</select>
@@ -107,7 +109,7 @@ async function ecranAccueil() {
   const p = a.paliers.prochain;
   afficher(`
     <h1 tabindex="-1">Le défi collectif</h1>
-    ${a.premiereSortieAFaire ? `<div class="banniere">Première étape : déclare ta première sortie. <a class="bouton" href="#declarer">Déclarer</a></div>` : ''}
+    ${a.avantSaison ? `<div class="banniere">Le défi démarre le ${dateLongue(a.saison.debut)}. Ton inscription est prise en compte.</div>` : a.premiereSortieAFaire ? `<div class="banniere">Première étape : déclare ta première sortie. <a class="bouton" href="#declarer">Déclarer</a></div>` : ''}
     <section class="carte anneau" aria-label="Compteur collectif">
       ${anneau(a.compteur, 140, kmCourt(courus))}
       <div>
@@ -144,6 +146,11 @@ async function ecranAccueil() {
 
 function ecranDeclarer() {
   const aujourdhui = new Date().toISOString().slice(0, 10);
+  if (aujourdhui < config.saison.debut) {
+    afficher(`<h1 tabindex="-1">Déclarer une sortie</h1>
+      <div class="carte"><p>Les déclarations ouvrent le ${dateLongue(config.saison.debut)}, au lancement de la saison.</p></div>`);
+    return;
+  }
   afficher(`
     <h1 tabindex="-1">Déclarer une sortie</h1>
     <form id="f" class="carte" novalidate>
@@ -154,7 +161,7 @@ function ecranDeclarer() {
       <label for="distance">Distance (km)</label>
       <input id="distance" type="number" inputmode="decimal" min="0.1" max="300" step="0.1" required autofocus>
       <label for="date">Date</label>
-      <input id="date" type="date" value="${aujourdhui}" max="${aujourdhui}">
+      <input id="date" type="date" value="${aujourdhui}" min="${config.saison.debut}" max="${aujourdhui}">
       <p id="apercu" class="kpi" aria-live="polite"><span class="val">0 m</span> <span class="lib">comptés au compteur</span></p>
       <div id="msg"></div>
       <button class="primaire pleine" type="submit">Valider</button>
@@ -276,6 +283,7 @@ async function ecranProfil() {
     ${referent}
     ${session.administrateur ? '<p><a class="bouton pleine" href="/admin.html">Back-office</a></p>' : ''}
     <p><a class="bouton pleine" href="/tableau.html">Tableau de bord</a></p>
+    ${config.authMode === 'oidc' ? '<p><a class="bouton pleine" href="/auth/deconnexion">Se déconnecter</a></p>' : ''}
     <section class="carte">
       <h2>Quitter le défi</h2>
       <p class="sec">Tes données personnelles sont supprimées immédiatement. Tes mètres restent au compteur collectif, anonymisés.</p>
@@ -327,6 +335,7 @@ async function demarrer() {
     session = await api('/api/session');
   } catch (e) {
     if (e.statut === 401 && config.authMode === 'dev') return ecranConnexionDev();
+    if (e.statut === 401 && config.authMode === 'oidc') return location.assign('/auth/connexion');
     return afficher(erreur(e));
   }
   if (!session.inscrit) {

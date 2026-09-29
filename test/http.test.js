@@ -11,6 +11,7 @@ const H = 'x-auth-request-email';
 
 before(async () => {
   const service = new Service(new Store(null), { maintenant: () => new Date('2026-09-29T10:00:00Z') });
+  Object.assign(service.e.parametres, { saison: { debut: '2026-01-01', fin: '2026-12-31' }, ratioMetresParContrat: 10 });
   service.importerAnnuaire([{ email: 'lea@ex.fr', prenom: 'Léa', nom: 'Martin', couloir: 'crc' }]);
   service.modifierParametres({ administrateurs: ['admin@ex.fr'] });
   serveur = createServer(creerApplication({ service, ingestToken: 'secret-ingest', dashboardToken: 'secret-ecran' }));
@@ -68,4 +69,21 @@ test('fichiers statiques et en-têtes de sécurité', async () => {
   assert.equal(r.status, 200);
   assert.match(r.headers.get('content-security-policy'), /default-src 'self'/);
   assert.equal((await fetch(`${base}/..%2f..%2fpackage.json`)).status, 404);
+});
+
+test('administration : pilotage, collaborateurs, correction, journal', async () => {
+  const admin = { email: 'admin@ex.fr' };
+  const p = await (await appel('/api/admin/pilotage', admin)).json();
+  assert.ok(Array.isArray(p.evolution) && p.projection.disponible);
+  const liste = await (await appel('/api/admin/collaborateurs', admin)).json();
+  const lea = liste.find((x) => x.email === 'lea@ex.fr');
+  const fiche = await (await appel(`/api/admin/collaborateurs/${lea.id}`, admin)).json();
+  const sortie = fiche.sorties[0];
+  const r = await appel(`/api/admin/sorties/${sortie.id}`, { ...admin, methode: 'PATCH', corps: { distanceKm: 6 } });
+  assert.equal((await r.json()).metresComptes, 6000);
+  assert.equal((await appel(`/api/admin/sorties/${sortie.id}`, { email: 'lea@ex.fr', methode: 'DELETE' })).status, 403);
+  const journal = await (await appel('/api/admin/journal', admin)).json();
+  assert.deepEqual(journal.slice(0, 2).map((j) => j.action), ['Sortie corrigée', 'Historique consulté']);
+  const synchro = await appel('/api/admin/contrats/synchroniser', { ...admin, methode: 'POST', corps: {} });
+  assert.equal(synchro.status, 409);
 });

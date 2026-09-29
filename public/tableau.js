@@ -1,6 +1,6 @@
 // Tableau de bord : rafraîchi toutes les heures (les contrats arrivent une fois par jour).
 // Accès : utilisateur authentifié, ou ?jeton=DASHBOARD_TOKEN pour un écran d'affichage sans session.
-import { api, h, km, kmCourt, kmSigne, pct, anneau, entier } from './commun.js';
+import { api, h, km, kmCourt, kmSigne, pct, anneau, entier, metresParContrat } from './commun.js';
 
 const vue = document.getElementById('vue');
 const jeton = new URLSearchParams(location.search).get('jeton');
@@ -12,7 +12,7 @@ async function rafraichir() {
     const i = t.indicateurs;
     const max = Math.max(1, ...t.classement.map((c) => c.metresParPersonne));
     vue.innerHTML = `
-      <div class="tb-entete"><h1>Défi 1 contrat = 10 m</h1><span class="sec">Données au ${new Date(t.jour).toLocaleDateString('fr-FR')}</span></div>
+      <div class="tb-entete"><h1>Défi 1 contrat = ${h(metresParContrat(t.ratioMetresParContrat))}</h1><span class="sec">Données au ${new Date(t.jour).toLocaleDateString('fr-FR')}</span></div>
       <div class="tb-grille">
         <section class="carte">
           <div class="tb-anneau">
@@ -24,7 +24,7 @@ async function rafraichir() {
             </div>
           </div>
           <h2>Paliers</h2>
-          <div class="tb-paliers">${t.paliers.paliers.map((p) => `<div class="tb-palier ${p.atteint ? 'atteint' : ''}">${p.pourcentage} %<div class="sec">${h(p.recompense)}</div></div>`).join('')}</div>
+          <div class="tb-paliers">${t.paliers.paliers.map((p) => `<div class="tb-palier ${p.atteint ? 'atteint' : ''}">${p.pourcentage} %<div class="sec">${h(p.recompense || 'Symbolique')}</div></div>`).join('')}</div>
         </section>
         <section class="carte">
           <h2>Couloirs · km par personne</h2>

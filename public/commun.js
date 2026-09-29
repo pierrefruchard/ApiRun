@@ -51,6 +51,9 @@ export function anneau({ courus, dus, objectif }, taille = 140, centre = '') {
   </svg>`;
 }
 
+// « 1 mètre », « 10 mètres »
+export const metresParContrat = (ratio) => `${String(ratio).replace('.', ',')} mètre${ratio >= 2 ? 's' : ''}`;
+
 export function dateCourte(iso) {
   return new Date(iso).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
 }

@@ -39,6 +39,12 @@ export class Service {
     return this.maintenant().toISOString().slice(0, 10);
   }
 
+  // ---------- Journal d'audit des actions d'administration ----------
+
+  journaliser(acteur, action, details = '', cibleUserId = null) {
+    this.e.journal.push({ le: this.maintenant().toISOString(), acteur, action, details, cibleUserId });
+  }
+
   // ---------- Identité et rôles ----------
 
   utilisateurParEmail(email) {
@@ -127,12 +133,18 @@ export class Service {
     this.e.fil = this.e.fil.filter((f) => !(f.type === 'badge' && f.userId === null));
     this.e.encouragements = this.e.encouragements.filter((x) => x.deUserId !== u.id);
     this.e.utilisateurs = this.e.utilisateurs.filter((x) => x.id !== u.id);
+    for (const j of this.e.journal) {
+      if (j.cibleUserId === u.id) {
+        j.cibleUserId = null;
+        j.details = 'Collaborateur désinscrit';
+      }
+    }
     this.store.sauver();
   }
 
   // ---------- Sorties ----------
 
-  declarerSortie(u, { activite, distanceKm, date }) {
+  validerSaisie({ activite, distanceKm, date }) {
     if (!ACTIVITES[activite]) throw new ErreurMetier('Activité inconnue.');
     const km = Number(distanceKm);
     if (!Number.isFinite(km) || km <= 0 || km > DISTANCE_MAX_KM) {
@@ -141,15 +153,26 @@ export class Service {
     const jour = date ?? this.aujourdhui();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(jour)) throw new ErreurMetier('Date invalide.');
     const { debut, fin } = this.e.parametres.saison;
-    if (jour < debut || jour > fin) throw new ErreurMetier('Date hors saison.');
+    if (jour < debut || jour > fin) throw new ErreurMetier(`Date hors saison (du ${debut} au ${fin}).`);
     if (jour > this.aujourdhui()) throw new ErreurMetier('Date dans le futur.');
+    return { km, jour };
+  }
 
-    const distanceMetres = Math.round(km * 1000);
+  // Pondération puis plafond journalier, en tenant compte des autres sorties du même jour.
+  calculerComptes(userId, activite, distanceMetres, jour, sauf = null) {
     const ponderes = metresPonderes(activite, distanceMetres);
     const dejaComptes = this.e.sorties
-      .filter((s) => s.userId === u.id && s.date === jour)
+      .filter((s) => s.id !== sauf && s.userId === userId && s.date === jour)
       .reduce((s, x) => s + x.metresComptes + x.metresEnAttente, 0);
-    const { comptes, enAttente } = appliquerPlafond(dejaComptes, ponderes, this.e.parametres.plafondJournalierMetres);
+    return { ponderes, ...appliquerPlafond(dejaComptes, ponderes, this.e.parametres.plafondJournalierMetres) };
+  }
+
+  declarerSortie(u, saisie) {
+    const { activite } = saisie;
+    const { km, jour } = this.validerSaisie(saisie);
+
+    const distanceMetres = Math.round(km * 1000);
+    const { ponderes, comptes, enAttente } = this.calculerComptes(u.id, activite, distanceMetres, jour);
 
     const sortie = {
       id: this.store.id(),
@@ -173,7 +196,6 @@ export class Service {
       sortieId: sortie.id,
       couloir: u.couloir,
       activite,
-      metres: comptes,
     });
     this.verifierPaliers();
     this.store.sauver();
@@ -182,7 +204,7 @@ export class Service {
 
   // ---------- Contrats (seul flux métier : un total par jour, sans donnée client) ----------
 
-  enregistrerContrats(date, nombre) {
+  enregistrerContrats(date, nombre, acteur = null) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new ErreurMetier('Date invalide.');
     const n = Number(nombre);
     if (!Number.isInteger(n) || n < 0) throw new ErreurMetier('Nombre de contrats invalide.');
@@ -190,6 +212,7 @@ export class Service {
     const delta = n - (existant?.nombre ?? 0);
     if (existant) existant.nombre = n;
     else this.e.contrats.push({ date, nombre: n });
+    if (acteur && delta !== 0) this.journaliser(acteur, 'Contrats saisis', `${date} : ${n}`);
     if (delta > 0) {
       this.e.fil.push({
         id: this.store.id(),
@@ -272,6 +295,8 @@ export class Service {
     const compteur = this.compteur();
     const profil = u.profil ? PROFILS_DEPART[u.profil] : null;
     return {
+      saison: this.e.parametres.saison,
+      avantSaison: jour < this.e.parametres.saison.debut,
       compteur,
       paliers: etatPaliers(compteur.courus, this.e.parametres),
       contributionSemaine: mesSorties.filter((s) => semaineIso(s.date) === semaine).reduce((s, x) => s + x.metresComptes, 0),
@@ -306,6 +331,7 @@ export class Service {
         const base = { id: f.id, type: f.type, le: f.le };
         switch (f.type) {
           case 'sortie': {
+            const sortie = this.e.sorties.find((s) => s.id === f.sortieId);
             const enc = this.e.encouragements.filter((x) => x.sortieId === f.sortieId);
             return {
               ...base,
@@ -313,7 +339,7 @@ export class Service {
               auteur: nomAffiche(parId.get(f.userId)),
               couloir: nomCouloir[f.couloir],
               activite: ACTIVITES[f.activite].libelle,
-              metres: f.metres,
+              metres: sortie?.metresComptes ?? 0,
               encouragements: enc.length,
               dejaEncourage: Boolean(u && enc.some((x) => x.deUserId === u.id)),
               estMoi: Boolean(u && f.userId === u.id),
@@ -339,6 +365,7 @@ export class Service {
     const inscrits = this.e.utilisateurs.length;
     return {
       jour,
+      ratioMetresParContrat: this.e.parametres.ratioMetresParContrat,
       compteur,
       paliers: etatPaliers(compteur.courus, this.e.parametres),
       classement,
@@ -363,7 +390,7 @@ export class Service {
 
   // ---------- Back-office ----------
 
-  modifierParametres(maj) {
+  modifierParametres(maj, acteur = 'systeme') {
     const p = this.e.parametres;
     if (maj.ratioMetresParContrat !== undefined) {
       const r = Number(maj.ratioMetresParContrat);
@@ -402,15 +429,17 @@ export class Service {
         Object.entries(maj.referents).map(([k, v]) => [k, v.map((x) => x.toLowerCase())]),
       );
     }
+    this.journaliser(acteur, 'Paramètres modifiés', Object.keys(maj).join(', '));
     this.verifierPaliers();
     this.store.sauver();
     return p;
   }
 
-  rattacher(userId, couloir) {
+  rattacher(userId, couloir, acteur = 'systeme') {
     const u = this.e.utilisateurs.find((x) => x.id === userId);
     if (!u) throw new ErreurMetier('Collaborateur introuvable.', 404);
     if (!COULOIRS.some((c) => c.id === couloir)) throw new ErreurMetier('Couloir inconnu.');
+    this.journaliser(acteur, 'Couloir modifié', `${u.prenom} ${u.nom} : ${u.couloir} → ${couloir}`, u.id);
     u.couloir = couloir;
     this.store.sauver();
     return u;
@@ -426,19 +455,20 @@ export class Service {
       });
   }
 
-  traiterHorsPlafond(sortieId, decision) {
+  traiterHorsPlafond(sortieId, decision, acteur = 'systeme') {
     const s = this.e.sorties.find((x) => x.id === sortieId && x.statutPlafond === 'en_attente');
     if (!s) throw new ErreurMetier('Déclaration introuvable dans la file.', 404);
     if (decision === 'valider') s.metresComptes += s.metresEnAttente;
     else if (decision !== 'refuser') throw new ErreurMetier('Décision attendue : valider ou refuser.');
     s.metresEnAttente = 0;
     s.statutPlafond = decision === 'valider' ? 'valide' : 'refuse';
+    this.journaliser(acteur, decision === 'valider' ? 'Hors plafond validé' : 'Hors plafond refusé', `Sortie du ${s.date}`, s.userId);
     this.verifierPaliers();
     this.store.sauver();
     return s;
   }
 
-  importerAnnuaire(lignes) {
+  importerAnnuaire(lignes, acteur = 'systeme') {
     let ajouts = 0;
     for (const l of lignes) {
       const email = l.email.toLowerCase();
@@ -450,12 +480,17 @@ export class Service {
         ajouts += 1;
       }
     }
+    this.journaliser(acteur, 'Annuaire importé', `${lignes.length} ligne(s), ${ajouts} ajout(s)`);
     this.store.sauver();
     // Les nouveaux arrivants sont à inviter : la liste sert à l'envoi du mail d'invitation.
     return { ajouts, aInviter: this.e.annuaire.filter((a) => !this.utilisateurParEmail(a.email)).map((a) => a.email) };
   }
 
-  exportCsv() {
+  exportCsv(acteur = null) {
+    if (acteur) {
+      this.journaliser(acteur, 'Export CSV');
+      this.store.sauver();
+    }
     const entete = 'date;couloir;activite;distance_m;metres_ponderes;metres_comptes;metres_en_attente;statut_plafond';
     const lignes = [...this.e.sorties]
       .sort((a, b) => a.date.localeCompare(b.date))
@@ -465,6 +500,175 @@ export class Service {
     return [entete, ...lignes].join('\n') + '\n';
   }
 
+  // ---------- Administration des collaborateurs ----------
+
+  listeCollaborateurs() {
+    const jour = this.aujourdhui();
+    return this.e.utilisateurs
+      .map((u) => {
+        const mes = this.e.sorties.filter((s) => s.userId === u.id);
+        const derniere = mes.reduce((d, s) => (s.date > d ? s.date : d), '');
+        return {
+          id: u.id,
+          email: u.email,
+          prenom: u.prenom,
+          nom: u.nom,
+          couloir: u.couloir,
+          inscritLe: u.inscritLe.slice(0, 10),
+          sorties: mes.length,
+          metres: metresCourus(mes),
+          derniereSortie: derniere || null,
+          inactif14j: !derniere || ecartJours(derniere, jour) >= 14,
+        };
+      })
+      .sort((a, b) => a.nom.localeCompare(b.nom) || a.prenom.localeCompare(b.prenom));
+  }
+
+  // Historique individuel : donnée personnelle, chaque consultation est tracée.
+  ficheCollaborateur(userId, acteur) {
+    const u = this.e.utilisateurs.find((x) => x.id === userId);
+    if (!u) throw new ErreurMetier('Collaborateur introuvable.', 404);
+    this.journaliser(acteur, 'Historique consulté', `${u.prenom} ${u.nom}`, u.id);
+    this.store.sauver();
+    const { id, email, prenom, nom, couloir, affichage, profil, inscritLe } = u;
+    return {
+      id, email, prenom, nom, couloir, affichage, profil, inscritLe,
+      sorties: this.e.sorties.filter((s) => s.userId === u.id).sort((a, b) => b.date.localeCompare(a.date)),
+      badges: this.badges(u).filter((b) => b.obtenu).map((b) => b.titre),
+    };
+  }
+
+  corrigerSortie(sortieId, maj, acteur) {
+    const s = this.e.sorties.find((x) => x.id === sortieId);
+    if (!s) throw new ErreurMetier('Sortie introuvable.', 404);
+    const saisie = {
+      activite: maj.activite ?? s.activite,
+      distanceKm: maj.distanceKm ?? s.distanceMetres / 1000,
+      date: maj.date ?? s.date,
+    };
+    const { km, jour } = this.validerSaisie(saisie);
+    const avant = `${s.activite} ${s.distanceMetres / 1000} km le ${s.date}`;
+    const distanceMetres = Math.round(km * 1000);
+    if (saisie.activite === s.activite && distanceMetres === s.distanceMetres && jour === s.date) return s;
+    const { ponderes, comptes, enAttente } = this.calculerComptes(s.userId, saisie.activite, distanceMetres, jour, s.id);
+    Object.assign(s, {
+      activite: saisie.activite,
+      distanceMetres,
+      date: jour,
+      metresPonderes: ponderes,
+      metresComptes: comptes,
+      metresEnAttente: enAttente,
+      statutPlafond: enAttente > 0 ? 'en_attente' : null,
+    });
+    const f = this.e.fil.find((x) => x.sortieId === s.id);
+    if (f) f.activite = s.activite;
+    this.journaliser(acteur, 'Sortie corrigée', `${avant} → ${s.activite} ${km} km le ${jour}`, s.userId);
+    this.verifierPaliers();
+    this.store.sauver();
+    return s;
+  }
+
+  supprimerSortie(sortieId, acteur) {
+    const s = this.e.sorties.find((x) => x.id === sortieId);
+    if (!s) throw new ErreurMetier('Sortie introuvable.', 404);
+    this.e.sorties = this.e.sorties.filter((x) => x.id !== sortieId);
+    this.e.fil = this.e.fil.filter((x) => x.sortieId !== sortieId);
+    this.e.encouragements = this.e.encouragements.filter((x) => x.sortieId !== sortieId);
+    this.journaliser(acteur, 'Sortie supprimée', `${s.activite} ${s.distanceMetres / 1000} km le ${s.date}`, s.userId);
+    this.store.sauver();
+  }
+
+  desinscrireParAdmin(userId, acteur) {
+    const u = this.e.utilisateurs.find((x) => x.id === userId);
+    if (!u) throw new ErreurMetier('Collaborateur introuvable.', 404);
+    this.journaliser(acteur, 'Désinscription par l’administrateur', `${u.prenom} ${u.nom}`, u.id);
+    this.desinscrire(u);
+  }
+
+  // ---------- Pilotage ----------
+
+  // Semaine par semaine depuis le début de saison : ce qui a été couru, ce qui était dû.
+  evolutionHebdomadaire() {
+    const { debut } = this.e.parametres.saison;
+    const jour = this.aujourdhui();
+    const ratio = this.e.parametres.ratioMetresParContrat;
+    const semaines = new Map();
+    for (let d = debut; d <= jour; d = ajouterJours(d, 1)) {
+      const k = semaineIso(d);
+      if (!semaines.has(k)) semaines.set(k, { semaine: k, debut: d, courus: 0, dus: 0, sorties: 0, actifs: new Set(), nouveauxInscrits: 0 });
+    }
+    for (const s of this.e.sorties) {
+      const w = semaines.get(semaineIso(s.date));
+      if (!w || s.date < debut) continue;
+      w.courus += s.metresComptes;
+      w.sorties += 1;
+      if (s.userId) w.actifs.add(s.userId);
+    }
+    for (const c of this.e.contrats) {
+      const w = semaines.get(semaineIso(c.date));
+      if (w && c.date >= debut) w.dus += c.nombre * ratio;
+    }
+    for (const u of this.e.utilisateurs) {
+      const w = semaines.get(semaineIso(u.inscritLe.slice(0, 10)));
+      if (w) w.nouveauxInscrits += 1;
+    }
+    let cumulCourus = 0;
+    let cumulDus = 0;
+    return [...semaines.values()].map((w) => {
+      cumulCourus += w.courus;
+      cumulDus += w.dus;
+      return { ...w, actifs: w.actifs.size, cumulCourus, cumulDus, ecart: cumulCourus - cumulDus };
+    });
+  }
+
+  // Projection au rythme des 28 derniers jours (ou depuis le début de saison si plus récent).
+  projection() {
+    const { debut, fin } = this.e.parametres.saison;
+    const jour = this.aujourdhui();
+    if (jour < debut) return { disponible: false, raison: `La saison démarre le ${debut}.` };
+    const depuis = [ajouterJours(jour, -27), debut].sort().at(-1);
+    const jours = ecartJours(depuis, jour) + 1;
+    const courus = metresCourus(this.e.sorties.filter((s) => s.date >= depuis && s.date <= jour));
+    const dus = this.e.contrats.filter((c) => c.date >= depuis && c.date <= jour).reduce((s, c) => s + c.nombre, 0) *
+      this.e.parametres.ratioMetresParContrat;
+    const rythmeCourus = courus / jours;
+    const rythmeDus = dus / jours;
+    const restants = Math.max(0, ecartJours(jour, fin));
+    const compteur = this.compteur();
+    const { paliers } = etatPaliers(compteur.courus, this.e.parametres);
+    return {
+      disponible: true,
+      baseJours: jours,
+      rythmeCourusSemaine: Math.round(rythmeCourus * 7),
+      rythmeDusSemaine: Math.round(rythmeDus * 7),
+      joursRestants: restants,
+      ecartProjete: Math.round(compteur.ecart + (rythmeCourus - rythmeDus) * restants),
+      courusProjetes: Math.round(compteur.courus + rythmeCourus * restants),
+      paliers: paliers.map((p) => {
+        if (p.atteint) return { pourcentage: p.pourcentage, atteint: true, dateEstimee: null };
+        const j = rythmeCourus > 0 ? Math.ceil(p.resteMetres / rythmeCourus) : null;
+        const date = j === null ? null : ajouterJours(jour, j);
+        return { pourcentage: p.pourcentage, atteint: false, dateEstimee: date && date <= fin ? date : null };
+      }),
+    };
+  }
+
+  // Signaux d'attrition, agrégés par couloir : aucun nom.
+  attrition() {
+    const liste = this.listeCollaborateurs();
+    return COULOIRS.map((c) => {
+      const du = liste.filter((u) => u.couloir === c.id);
+      return {
+        couloir: c.id,
+        nom: c.nom,
+        inscrits: du.length,
+        jamaisSortis: du.filter((u) => !u.derniereSortie).length,
+        inactifs14j: du.filter((u) => u.derniereSortie && u.inactif14j).length,
+        actifs14j: du.filter((u) => !u.inactif14j).length,
+      };
+    });
+  }
+
   // Conservation : suppression des données personnelles 3 mois après la fin de saison.
   purgeRgpd() {
     const fin = new Date(`${this.e.parametres.saison.fin}T00:00:00Z`);
@@ -472,9 +676,20 @@ export class Service {
     if (this.maintenant() < fin) return { purge: false, echeance: fin.toISOString().slice(0, 10) };
     for (const u of [...this.e.utilisateurs]) this.desinscrire(u);
     this.e.annuaire = [];
+    this.e.journal = [];
     this.store.sauver();
     return { purge: true, echeance: fin.toISOString().slice(0, 10) };
   }
+}
+
+function ajouterJours(jour, n) {
+  const d = new Date(`${jour}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+function ecartJours(de, a) {
+  return Math.round((new Date(`${a}T00:00:00Z`) - new Date(`${de}T00:00:00Z`)) / 86400000);
 }
 
 function moisPrecedent(jour) {

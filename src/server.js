@@ -1,10 +1,6 @@
 // Serveur HTTP sans dépendance : API JSON + fichiers statiques.
 //
-// Authentification (exigence : SSO, aucun mot de passe spécifique) :
-//  - AUTH_MODE=proxy (défaut) : l'application est placée derrière le proxy SSO de l'entreprise
-//    (oauth2-proxy, Azure App Proxy, etc.), qui transmet l'email du compte professionnel dans
-//    l'en-tête AUTH_HEADER (défaut : x-auth-request-email). Le serveur ne doit pas être exposé sans ce proxy.
-//  - AUTH_MODE=dev : connexion simulée par choix dans l'annuaire, pour la démo et les tests.
+// Authentification : voir src/auth.js (Google IAP, Google OIDC, proxy SSO, démo).
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -14,6 +10,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { Store } from './store.js';
 import { Service, ErreurMetier } from './service.js';
 import { ACTIVITES, COULOIRS, PROFILS_DEPART } from './config.js';
+import { creerAuthentification } from './auth.js';
+import { configurationSi, planifierSynchronisation, synchroniserContrats } from './connecteurs/contrats-si.js';
 
 const RACINE_PUBLIC = fileURLToPath(new URL('../public/', import.meta.url));
 const TYPES = {
@@ -24,7 +22,9 @@ const TYPES = {
   '.json': 'application/json',
 };
 
-export function creerApplication({ service, authMode = 'proxy', authHeader = 'x-auth-request-email', ingestToken, dashboardToken }) {
+export function creerApplication({ service, auth, authMode = 'proxy', authHeader, ingestToken, dashboardToken, connecteurSi = null }) {
+  auth ??= creerAuthentification({ mode: authMode, entete: authHeader });
+  authMode = auth.mode;
   const routes = [];
   const route = (methode, motif, role, gestion) => {
     const cles = [];
@@ -39,6 +39,7 @@ export function creerApplication({ service, authMode = 'proxy', authHeader = 'x-
     profils: PROFILS_DEPART,
     ratioMetresParContrat: service.e.parametres.ratioMetresParContrat,
     plafondJournalierMetres: service.e.parametres.plafondJournalierMetres,
+    saison: service.e.parametres.saison,
     authMode,
   }));
   route('GET', '/api/session', 'authentifie', (ctx) => service.profilSession(ctx.email));
@@ -64,34 +65,48 @@ export function creerApplication({ service, authMode = 'proxy', authHeader = 'x-
     service.tauxInscription(ctx.admin ? COULOIRS.map((c) => c.id) : ctx.referentDe),
   );
 
-  // ----- Back-office -----
-  route('GET', '/api/admin/parametres', 'admin', () => service.e.parametres);
-  route('PUT', '/api/admin/parametres', 'admin', (ctx) => service.modifierParametres(ctx.corps));
-  route('GET', '/api/admin/utilisateurs', 'admin', () =>
-    service.e.utilisateurs.map(({ id, email, prenom, nom, couloir }) => ({ id, email, prenom, nom, couloir })),
-  );
-  route('POST', '/api/admin/utilisateurs/:id/couloir', 'admin', (ctx) => service.rattacher(ctx.params.id, ctx.corps.couloir));
-  route('GET', '/api/admin/hors-plafond', 'admin', () => service.fileHorsPlafond());
-  route('POST', '/api/admin/hors-plafond/:id', 'admin', (ctx) => service.traiterHorsPlafond(ctx.params.id, ctx.corps.decision));
-  route('POST', '/api/admin/contrats', 'admin', (ctx) => service.enregistrerContrats(ctx.corps.date, ctx.corps.nombre));
-  route('GET', '/api/admin/contrats', 'admin', () => [...service.e.contrats].sort((a, b) => b.date.localeCompare(a.date)));
-  route('POST', '/api/admin/annuaire', 'admin', (ctx) => service.importerAnnuaire(ctx.corps));
-  route('GET', '/api/admin/export.csv', 'admin', () => ({ __csv: service.exportCsv() }));
+  // ----- Back-office : pilotage -----
+  route('GET', '/api/admin/pilotage', 'admin', () => ({
+    tableau: service.tableauDeBord(),
+    evolution: service.evolutionHebdomadaire(),
+    projection: service.projection(),
+    attrition: service.attrition(),
+    fileHorsPlafond: service.fileHorsPlafond().length,
+  }));
 
-  // ----- Flux automatisé : extraction quotidienne des contrats depuis le SI de gestion -----
+  // ----- Back-office : collaborateurs -----
+  route('GET', '/api/admin/collaborateurs', 'admin', () => service.listeCollaborateurs());
+  route('GET', '/api/admin/collaborateurs/:id', 'admin', (ctx) => service.ficheCollaborateur(ctx.params.id, ctx.email));
+  route('POST', '/api/admin/collaborateurs/:id/couloir', 'admin', (ctx) => service.rattacher(ctx.params.id, ctx.corps.couloir, ctx.email));
+  route('DELETE', '/api/admin/collaborateurs/:id', 'admin', (ctx) => (service.desinscrireParAdmin(ctx.params.id, ctx.email), { desinscrit: true }));
+  route('PATCH', '/api/admin/sorties/:id', 'admin', (ctx) => service.corrigerSortie(ctx.params.id, ctx.corps, ctx.email));
+  route('DELETE', '/api/admin/sorties/:id', 'admin', (ctx) => (service.supprimerSortie(ctx.params.id, ctx.email), { supprime: true }));
+  route('GET', '/api/admin/hors-plafond', 'admin', () => service.fileHorsPlafond());
+  route('POST', '/api/admin/hors-plafond/:id', 'admin', (ctx) => service.traiterHorsPlafond(ctx.params.id, ctx.corps.decision, ctx.email));
+
+  // ----- Back-office : contrats, paramètres, annuaire, journal -----
+  route('GET', '/api/admin/contrats', 'admin', () => ({
+    jours: [...service.e.contrats].sort((a, b) => b.date.localeCompare(a.date)),
+    synchro: service.e.syncContrats,
+    connecteurConfigure: Boolean(connecteurSi),
+  }));
+  route('POST', '/api/admin/contrats', 'admin', (ctx) => service.enregistrerContrats(ctx.corps.date, ctx.corps.nombre, ctx.email));
+  route('POST', '/api/admin/contrats/synchroniser', 'admin', async (ctx) => {
+    if (!connecteurSi) throw new ErreurMetier('Connecteur SI non configuré (SI_API_URL, SI_API_KEY).', 409);
+    service.journaliser(ctx.email, 'Synchronisation contrats lancée');
+    return synchroniserContrats(service, connecteurSi);
+  });
+  route('GET', '/api/admin/parametres', 'admin', () => service.e.parametres);
+  route('PUT', '/api/admin/parametres', 'admin', (ctx) => service.modifierParametres(ctx.corps, ctx.email));
+  route('POST', '/api/admin/annuaire', 'admin', (ctx) => service.importerAnnuaire(ctx.corps, ctx.email));
+  route('GET', '/api/admin/journal', 'admin', () => [...service.e.journal].reverse().slice(0, 500));
+  route('GET', '/api/admin/export.csv', 'admin', (ctx) => ({ __csv: service.exportCsv(ctx.email) }));
+
+  // ----- Voie alternative (désactivée sans INGEST_TOKEN) : le SI pousse ses totaux -----
   route('POST', '/api/ingest/contrats', 'ingest', (ctx) => {
     const lignes = Array.isArray(ctx.corps) ? ctx.corps : [ctx.corps];
     return lignes.map((l) => service.enregistrerContrats(l.date, l.nombre));
   });
-
-  function identifier(req) {
-    if (authMode === 'dev') {
-      const cookie = /(?:^|;\s*)dev_email=([^;]+)/.exec(req.headers.cookie ?? '');
-      return cookie ? decodeURIComponent(cookie[1]).toLowerCase() : null;
-    }
-    const v = req.headers[authHeader];
-    return typeof v === 'string' && v.includes('@') ? v.trim().toLowerCase() : null;
-  }
 
   function jetonValide(fourni, attendu) {
     if (!attendu || !fourni) return false;
@@ -173,6 +188,8 @@ export function creerApplication({ service, authMode = 'proxy', authHeader = 'x-
         return envoyer(res, 200, { ok: true }, { 'set-cookie': `dev_email=${encodeURIComponent(email ?? '')}; Path=/; HttpOnly; SameSite=Strict` });
       }
 
+      if (auth.routes[url.pathname]) return await auth.routes[url.pathname](req, res, url);
+
       if (!url.pathname.startsWith('/api/')) {
         if (req.method !== 'GET') return envoyer(res, 405, { erreur: 'Méthode non autorisée.' });
         return await servirStatique(res, url.pathname);
@@ -187,7 +204,7 @@ export function creerApplication({ service, authMode = 'proxy', authHeader = 'x-
       }
 
       const params = Object.fromEntries(r.cles.map((k, i) => [k, decodeURIComponent(r.re.exec(url.pathname)[i + 1])]));
-      const ctx = { email: identifier(req), params };
+      const ctx = { email: await auth.identifier(req), params };
       autoriser(r.role, req, url, ctx);
       ctx.corps = req.method === 'GET' ? {} : await lireCorps(req);
       const resultat = await r.gestion(ctx);
@@ -209,20 +226,40 @@ export function creerApplication({ service, authMode = 'proxy', authHeader = 'x-
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const store = new Store(process.env.DATA_FILE ?? fileURLToPath(new URL('../data/defi.json', import.meta.url)));
+  const env = process.env;
+  const store = new Store(env.DATA_FILE ?? fileURLToPath(new URL('../data/defi.json', import.meta.url)));
   const service = new Service(store);
-  const admins = (process.env.ADMIN_EMAILS ?? '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+  const admins = (env.ADMIN_EMAILS ?? '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
   for (const a of admins) if (!store.etat.parametres.administrateurs.includes(a)) store.etat.parametres.administrateurs.push(a);
-  const authMode = process.env.AUTH_MODE ?? 'proxy';
+
+  if (!env.AUTH_MODE) {
+    console.error('AUTH_MODE requis : iap (Google Cloud + IAP), oidc (Google OpenID Connect), proxy ou dev.');
+    process.exit(1);
+  }
+  const auth = creerAuthentification({
+    mode: env.AUTH_MODE,
+    entete: env.AUTH_HEADER,
+    audience: env.IAP_AUDIENCE,
+    domaine: env.GOOGLE_HD,
+    clientId: env.GOOGLE_CLIENT_ID,
+    clientSecret: env.GOOGLE_CLIENT_SECRET,
+    urlBase: env.BASE_URL,
+    secretSession: env.SESSION_SECRET,
+  });
+  const connecteurSi = configurationSi(env);
+  if (connecteurSi) planifierSynchronisation(service, connecteurSi);
+
   const gestionnaire = creerApplication({
     service,
-    authMode,
-    authHeader: (process.env.AUTH_HEADER ?? 'x-auth-request-email').toLowerCase(),
-    ingestToken: process.env.INGEST_TOKEN,
-    dashboardToken: process.env.DASHBOARD_TOKEN,
+    auth,
+    connecteurSi,
+    ingestToken: env.INGEST_TOKEN,
+    dashboardToken: env.DASHBOARD_TOKEN,
   });
-  const port = Number(process.env.PORT ?? 3000);
+  const port = Number(env.PORT ?? 3000);
   createServer(gestionnaire).listen(port, () => {
-    console.log(`Défi 1 contrat = ${store.etat.parametres.ratioMetresParContrat} m · http://localhost:${port} · auth=${authMode}`);
+    const { ratioMetresParContrat, saison } = store.etat.parametres;
+    console.log(`Défi 1 contrat = ${ratioMetresParContrat} m · saison ${saison.debut} → ${saison.fin} · http://localhost:${port}`);
+    console.log(`Authentification : ${auth.mode} · connecteur SI : ${connecteurSi ? 'actif' : 'non configuré'}`);
   });
 }

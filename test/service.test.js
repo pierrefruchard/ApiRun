@@ -7,6 +7,7 @@ function contexte(date = '2026-09-29T10:00:00Z') {
   const store = new Store(null);
   let horloge = new Date(date);
   const service = new Service(store, { maintenant: () => horloge });
+  Object.assign(store.etat.parametres, { saison: { debut: '2026-01-01', fin: '2026-12-31' }, ratioMetresParContrat: 10 });
   service.importerAnnuaire([
     { email: 'lea.martin@ex.fr', prenom: 'Léa', nom: 'Martin', couloir: 'crc' },
     { email: 'hugo.petit@ex.fr', prenom: 'Hugo', nom: 'Petit', couloir: 'dsi' },

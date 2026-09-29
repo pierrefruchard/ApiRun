@@ -26,19 +26,21 @@ export const AFFICHAGES = ['prenom', 'initiales', 'anonyme'];
 
 export function parametresParDefaut() {
   return {
-    saison: { debut: '2026-01-01', fin: '2026-12-31' },
-    ratioMetresParContrat: 10,
+    // Saison 2027, test de la mécanique : paliers symboliques, sans récompense matérielle.
+    saison: { debut: '2027-01-04', fin: '2027-12-31' },
+    ratioMetresParContrat: 1,
     contratsAnnuelsPrevus: 20000,
     plafondJournalierMetres: 30000,
     seuilCouloirMetresParPersonne: 1000,
     paliers: [
-      { pourcentage: 25, recompense: 'À définir (Codir)' },
-      { pourcentage: 50, recompense: 'À définir (Codir)' },
-      { pourcentage: 75, recompense: 'À définir (Codir)' },
-      { pourcentage: 100, recompense: 'À définir (Codir)' },
+      { pourcentage: 25, recompense: '' },
+      { pourcentage: 50, recompense: '' },
+      { pourcentage: 75, recompense: '' },
+      { pourcentage: 100, recompense: '' },
     ],
     // Effectif réel de chaque couloir (annuaire), base du km par personne.
     effectifs: { crc: 15, sante: 15, iard: 15, prevoyance: 15, dsi: 15, transfo: 15 },
+    // Un titulaire et un suppléant, pour ne pas bloquer la file hors plafond pendant les congés.
     administrateurs: [],
     referents: {},
   };

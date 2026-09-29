@@ -25,8 +25,10 @@ for (let i = 0; i < 90; i++) {
   annuaire.push({ email: `${prenom}.${nom}${i}@exemple.fr`.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(), prenom, nom, couloir: COULOIRS[i % 6].id });
 }
 service.importerAnnuaire(annuaire);
+// La saison réelle démarre le 4 janvier 2027 : la démo rejoue la mécanique sur 2026.
 service.modifierParametres({
-  administrateurs: [annuaire[0].email],
+  saison: { debut: '2026-01-01', fin: '2026-12-31' },
+  administrateurs: [annuaire[0].email, annuaire[1].email],
   referents: Object.fromEntries(COULOIRS.map((c, i) => [c.id, [annuaire[i].email]])),
 });
 
@@ -62,4 +64,5 @@ horloge = new Date();
 service.declarerSortie(utilisateurs[1], { activite: 'velo', distanceKm: 120, date: aujourdhui });
 
 console.log(`Démo prête : ${annuaire.length} collaborateurs, ${utilisateurs.length} inscrits, ${store.etat.sorties.length} sorties.`);
-console.log(`Administrateur : ${annuaire[0].email}`);
+console.log(`Administrateurs : ${annuaire[0].email} (titulaire), ${annuaire[1].email} (suppléant)`);
+console.log('Saison de démonstration : 2026. Paramètres réels : 4 janvier 2027, 1 m par contrat.');

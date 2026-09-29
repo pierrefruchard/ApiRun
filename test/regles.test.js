@@ -5,7 +5,8 @@ import {
   appliquerPlafond, classementCouloirs, couloirDuMois, etatPaliers, metresDus, metresPonderes, objectifMetres,
 } from '../src/domain/regles.js';
 
-const P = parametresParDefaut();
+// Paramètres figés pour tester la mécanique, indépendamment des valeurs par défaut.
+const P = { ...parametresParDefaut(), saison: { debut: '2026-01-01', fin: '2026-12-31' }, ratioMetresParContrat: 10 };
 
 test('règle 1 · mètres dus = contrats cumulés depuis le 1er janvier × ratio', () => {
   const contrats = [
